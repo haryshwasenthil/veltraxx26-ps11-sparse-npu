@@ -59,7 +59,7 @@ print("Model loaded successfully!")
 # 3. Pruning function
 # ============================================================
 
-TARGET_SPARSITY = 0.60
+TARGET_SPARSITY = 0.80
 
 
 def prune_matrix(weight_matrix, target_sparsity):
