@@ -1,0 +1,6 @@
+PS11 Dense MLP Baseline
+=======================
+Dataset: MNIST
+Architecture: 784-128-64-10
+Epochs: 5
+Accuracy: 97.37%
