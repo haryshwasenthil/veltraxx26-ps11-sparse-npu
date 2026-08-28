@@ -1,216 +1,298 @@
+import torch
+import torch.nn as nn
 import numpy as np
+import os
 
 
 # ============================================================
-# MEMBER 2 - WEIGHT PRUNING + CSR COMPRESSION
+# 1. Define the same MLP architecture used by Member 1
 # ============================================================
 
-# ------------------------------------------------------------
-# STEP 1: Create example neural-network weights
-# ------------------------------------------------------------
+class MLP(nn.Module):
 
-weights = np.array([
-    [0.5, 0.01, -0.8, 0.002],
-    [0.7, -0.03, 0.001, 0.9],
-    [0.02, 0.6, -0.004, 0.3]
-], dtype=np.float32)
+    def __init__(self):
+        super().__init__()
 
-print("===== ORIGINAL WEIGHTS =====")
-print(weights)
+        self.fc1 = nn.Linear(784, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, 10)
 
+    def forward(self, x):
 
-# ------------------------------------------------------------
-# STEP 2: Set target sparsity
-# ------------------------------------------------------------
+        x = x.view(x.size(0), 784)
 
-target_sparsity = 0.60
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = self.fc3(x)
 
-print("\nTarget sparsity:", target_sparsity * 100, "%")
+        return x
 
 
-# ------------------------------------------------------------
-# STEP 3: Flatten weights
-# ------------------------------------------------------------
+# ============================================================
+# 2. Load the trained model
+# ============================================================
 
-flat_weights = weights.flatten()
+MODEL_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "models",
+    "dense_mlp.pth"
+)
 
-total_weights = len(flat_weights)
+print("Loading model:")
+print(MODEL_PATH)
+
+model = MLP()
+
+state_dict = torch.load(
+    MODEL_PATH,
+    map_location="cpu"
+)
+
+model.load_state_dict(state_dict)
+
+model.eval()
+
+print("Model loaded successfully!")
+
+
+# ============================================================
+# 3. Pruning function
+# ============================================================
+
+TARGET_SPARSITY = 0.60
+
+
+def prune_matrix(weight_matrix, target_sparsity):
+
+    flat = weight_matrix.flatten()
+
+    total_weights = flat.numel()
+
+    number_to_prune = int(
+        np.ceil(total_weights * target_sparsity)
+    )
+
+    magnitudes = torch.abs(flat)
+
+    prune_indices = torch.argsort(magnitudes)[:number_to_prune]
+
+    pruned = flat.clone()
+
+    pruned[prune_indices] = 0
+
+    return pruned.reshape(weight_matrix.shape)
+
+
+# ============================================================
+# 4. Prune all MLP weight matrices
+# ============================================================
+
+print()
+print("========================================")
+print("PRUNING MLP")
+print("========================================")
+
+weight_names = [
+    "fc1.weight",
+    "fc2.weight",
+    "fc3.weight"
+]
+
+total_weights = 0
+total_zeros = 0
+
+for name in weight_names:
+
+    original = model.state_dict()[name].clone()
+
+    pruned = prune_matrix(
+        original,
+        TARGET_SPARSITY
+    )
+
+    model.state_dict()[name].copy_(pruned)
+
+    zeros = torch.sum(pruned == 0).item()
+    weights = pruned.numel()
+
+    sparsity = 100 * zeros / weights
+
+    total_weights += weights
+    total_zeros += zeros
+
+    print()
+    print(name)
+    print("Shape:", tuple(pruned.shape))
+    print("Total weights:", weights)
+    print("Zero weights:", zeros)
+    print(f"Sparsity: {sparsity:.2f}%")
+
+
+# ============================================================
+# 5. Overall sparsity
+# ============================================================
+
+overall_sparsity = (
+    100 * total_zeros / total_weights
+)
+
+print()
+print("========================================")
+print("OVERALL SPARSITY")
+print("========================================")
 
 print("Total weights:", total_weights)
+print("Total zeros:", total_zeros)
+print("Non-zero weights:", total_weights - total_zeros)
 
-
-# ------------------------------------------------------------
-# STEP 4: Decide how many weights to prune
-# ------------------------------------------------------------
-
-num_to_prune = int(
-    np.ceil(total_weights * target_sparsity)
+print(
+    f"Overall sparsity: {overall_sparsity:.2f}%"
 )
 
-print("Weights to prune:", num_to_prune)
 
+if overall_sparsity >= 60:
 
-# ------------------------------------------------------------
-# STEP 5: Calculate magnitude of every weight
-# ------------------------------------------------------------
+    print("SUCCESS: Sparsity requirement >= 60%")
 
-magnitudes = np.abs(flat_weights)
-
-
-# ------------------------------------------------------------
-# STEP 6: Find smallest weights
-# ------------------------------------------------------------
-
-prune_indices = np.argsort(magnitudes)[:num_to_prune]
-
-
-# ------------------------------------------------------------
-# STEP 7: Set selected weights to zero
-# ------------------------------------------------------------
-
-pruned_weights = weights.copy()
-
-flat_pruned = pruned_weights.flatten()
-
-flat_pruned[prune_indices] = 0
-
-pruned_weights = flat_pruned.reshape(weights.shape)
-
-
-print("\n===== PRUNED WEIGHTS =====")
-print(pruned_weights)
-
-
-# ------------------------------------------------------------
-# STEP 8: Calculate actual sparsity
-# ------------------------------------------------------------
-
-total_weights = pruned_weights.size
-
-zero_weights = np.count_nonzero(
-    pruned_weights == 0
-)
-
-nonzero_weights = np.count_nonzero(
-    pruned_weights
-)
-
-sparsity = (
-    zero_weights / total_weights
-) * 100
-
-
-print("\n===== SPARSITY RESULTS =====")
-
-print("Total weights:", total_weights)
-
-print("Zero weights:", zero_weights)
-
-print("Non-zero weights:", nonzero_weights)
-
-print("Sparsity:", sparsity, "%")
-
-
-# ------------------------------------------------------------
-# STEP 9: Check whether we achieved 60% sparsity
-# ------------------------------------------------------------
-
-if sparsity >= 60:
-    print("\nSUCCESS: Sparsity requirement >= 60%")
 else:
-    print("\nFAILED: Sparsity requirement < 60%")
+
+    print("WARNING: Sparsity requirement not reached")
 
 
-# ------------------------------------------------------------
-# STEP 10: CSR COMPRESSION
-# ------------------------------------------------------------
+# ============================================================
+# 6. CSR compression
+# ============================================================
 
-values = []
+def matrix_to_csr(matrix):
 
-column_indices = []
+    values = []
+    column_indices = []
+    row_ptr = [0]
 
-row_ptr = [0]
+    rows = matrix.shape[0]
 
+    for row in range(rows):
 
-for row in pruned_weights:
+        for col in range(matrix.shape[1]):
 
-    for col, value in enumerate(row):
+            value = matrix[row, col].item()
 
-        # Store only non-zero values
-        if value != 0:
+            if value != 0:
 
-            values.append(value)
+                values.append(value)
+                column_indices.append(col)
 
-            column_indices.append(col)
+        row_ptr.append(len(values))
 
-    # Number of stored values so far
-    row_ptr.append(len(values))
-
-
-# ------------------------------------------------------------
-# STEP 11: Display CSR data
-# ------------------------------------------------------------
-
-print("\n===== CSR DATA =====")
-
-print("\nValues:")
-print(values)
-
-print("\nColumn indices:")
-print(column_indices)
-
-print("\nRow pointer:")
-print(row_ptr)
+    return (
+        np.array(values, dtype=np.float32),
+        np.array(column_indices, dtype=np.int32),
+        np.array(row_ptr, dtype=np.int32)
+    )
 
 
-# ------------------------------------------------------------
-# STEP 12: Convert CSR arrays to proper data types
-# ------------------------------------------------------------
+# ============================================================
+# 7. Create output directory
+# ============================================================
 
-values_array = np.array(
-    values,
-    dtype=np.float32
+RESULTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "results"
 )
 
-column_indices_array = np.array(
-    column_indices,
-    dtype=np.int32
-)
-
-row_ptr_array = np.array(
-    row_ptr,
-    dtype=np.int32
+os.makedirs(
+    RESULTS_DIR,
+    exist_ok=True
 )
 
 
-# ------------------------------------------------------------
-# STEP 13: Save CSR files
-# ------------------------------------------------------------
+# ============================================================
+# 8. Compress each layer using CSR
+# ============================================================
 
-np.save(
-    "values.npy",
-    values_array
+print()
+print("========================================")
+print("CSR COMPRESSION")
+print("========================================")
+
+for name in weight_names:
+
+    matrix = model.state_dict()[name]
+
+    values, column_indices, row_ptr = matrix_to_csr(
+        matrix
+    )
+
+    layer_name = name.replace(".weight", "")
+
+    values_path = os.path.join(
+        RESULTS_DIR,
+        layer_name + "_values.npy"
+    )
+
+    columns_path = os.path.join(
+        RESULTS_DIR,
+        layer_name + "_column_indices.npy"
+    )
+
+    row_ptr_path = os.path.join(
+        RESULTS_DIR,
+        layer_name + "_row_ptr.npy"
+    )
+
+    np.save(values_path, values)
+
+    np.save(
+        columns_path,
+        column_indices
+    )
+
+    np.save(
+        row_ptr_path,
+        row_ptr
+    )
+
+    print()
+    print(layer_name)
+
+    print("Non-zero values:", len(values))
+
+    print("Values file:", values_path)
+
+    print(
+        "Column indices file:",
+        columns_path
+    )
+
+    print(
+        "Row pointer file:",
+        row_ptr_path
+    )
+
+
+# ============================================================
+# 9. Save the pruned PyTorch model
+# ============================================================
+
+PRUNED_MODEL_PATH = os.path.join(
+    RESULTS_DIR,
+    "pruned_mlp.pth"
 )
 
-np.save(
-    "column_indices.npy",
-    column_indices_array
+torch.save(
+    model.state_dict(),
+    PRUNED_MODEL_PATH
 )
 
-np.save(
-    "row_ptr.npy",
-    row_ptr_array
+print()
+print("========================================")
+print("PRUNING + CSR COMPLETE")
+print("========================================")
+
+print(
+    "Pruned model saved:",
+    PRUNED_MODEL_PATH
 )
 
-
-# ------------------------------------------------------------
-# STEP 14: Final message
-# ------------------------------------------------------------
-
-print("\n===== FILES SAVED =====")
-
-print("values.npy")
-print("column_indices.npy")
-print("row_ptr.npy")
-
-print("\n===== MEMBER 2 PROTOTYPE COMPLETE =====")
+print()
+print("Member 2 pipeline completed successfully!")
